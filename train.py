@@ -47,6 +47,7 @@ except ImportError:
     summary = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+torch.set_float32_matmul_precision('high')
 
 
 @dataclass
@@ -492,7 +493,7 @@ def train(config: TrainConfig):
         model_config.checkpoint_activations = config.checkpoint_activations
         model = Qwen3ForCausalLM(model_config)
         model = model.to(device=device, dtype=dtype)
-        model = torch.compile(model)
+        
         # Model weights will be loaded later along with optimizer/scheduler
     elif config.init_from_scratch:
         if is_main_process(rank):
@@ -514,8 +515,11 @@ def train(config: TrainConfig):
         model.config.checkpoint_activations = config.checkpoint_activations
         model.model.checkpoint_activations = config.checkpoint_activations
     
+    model = torch.compile(model)
+    
     # Print model architecture
     if is_main_process(rank):
+        print()
         print("\n" + "=" * 80)
         print("MODEL ARCHITECTURE")
         print("=" * 80)

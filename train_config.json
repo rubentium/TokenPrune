@@ -2,12 +2,12 @@
     "model": {
         "path": "../qwen3_06b_base",
         "dtype": "bfloat16",
-        "init_from_scratch": false
+        "init_from_scratch": true
     },
     "data": {
         "train_path": "./data/pile_train_longer/tokenized",
         "val_path": null,
-        "max_seq_length": 1024,
+        "max_seq_length": 2048,
         "num_workers": 8
     },
     "training": {
@@ -35,7 +35,7 @@
         "mixed_precision": "bf16"
     },
     "wandb": {
-        "enabled": true,
+        "enabled": false,
         "project": "qwen3-tokenprune",
         "name": null,
         "tags": ["qwen3", "0.6b"]
