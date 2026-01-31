@@ -1,0 +1,42 @@
+{
+    "model": {
+        "path": "../qwen3_06b_base",
+        "dtype": "bfloat16",
+        "init_from_scratch": true
+    },
+    "data": {
+        "train_path": "./data/pile_train/tokenized",
+        "val_path": null,
+        "max_seq_length": 512,
+        "num_workers": 0
+    },
+    "training": {
+        "output_dir": "./checkpoints",
+        "num_epochs": 1,
+        "max_steps": 10000,
+        "per_device_batch_size": 16,
+        "gradient_accumulation_steps": 8,
+        "learning_rate": 1e-4,
+        "weight_decay": 0.01,
+        "warmup_steps": 100,
+        "lr_scheduler": "cosine",
+        "max_grad_norm": 1.0,
+        "save_steps": 500,
+        "eval_steps": 200,
+        "eval_batches": 30,
+        "logging_steps": 10,
+        "seed": 42,
+        "verbose": false
+    },
+    "distributed": {
+        "strategy": "ddp",
+        "mixed_precision": "bf16"
+    },
+    "wandb": {
+        "enabled": true,
+        "project": "qwen3-tokenprune",
+        "name": null,
+        "tags": ["qwen3", "0.6b"]
+    },
+    "flash_attention": true
+}

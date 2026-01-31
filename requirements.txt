@@ -1,0 +1,15 @@
+packaging>=23.1
+torch>=2.0.0+cu121
+transformers>=4.40.0
+safetensors>=0.4.0
+datasets>=2.14.0
+wandb>=0.15.0
+accelerate>=0.24.0
+zstandard>=0.21.0
+tqdm>=4.65.0
+torchinfo>=1.8.0
+
+# you have to download the flash-attn module separately when this entire list of requirements is installed
+# pip install flash-attn
+# or better just pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+# to avoid building from source which takes a long time
