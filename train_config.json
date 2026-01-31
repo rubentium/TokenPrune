@@ -2,7 +2,7 @@
     "model": {
         "path": "../qwen3_06b_base",
         "dtype": "bfloat16",
-        "init_from_scratch": true
+        "init_from_scratch": false
     },
     "data": {
         "train_path": "./data/pile_train/tokenized",
@@ -12,9 +12,10 @@
     },
     "training": {
         "output_dir": "./checkpoints",
+        "resume_from_checkpoint": null,
         "num_epochs": 1,
-        "max_steps": 10000,
-        "per_device_batch_size": 16,
+        "max_steps": 50000,
+        "per_device_batch_size": 8,
         "gradient_accumulation_steps": 8,
         "learning_rate": 1e-4,
         "weight_decay": 0.01,
@@ -22,7 +23,7 @@
         "lr_scheduler": "cosine",
         "max_grad_norm": 1.0,
         "save_steps": 500,
-        "eval_steps": 200,
+        "eval_steps": 250,
         "eval_batches": 30,
         "logging_steps": 10,
         "seed": 42,

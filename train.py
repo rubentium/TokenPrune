@@ -20,6 +20,7 @@ import sys
 import time
 import wandb
 from pathlib import Path
+from datetime import datetime
 from typing import Optional, Union
 from dataclasses import dataclass
 from datasets import load_from_disk
@@ -63,6 +64,7 @@ class TrainConfig:
     
     # Training
     output_dir: str = "./checkpoints"
+    resume_from_checkpoint: Optional[str] = None  # Path to checkpoint dir to resume from
     num_epochs: int = 1
     max_steps: Optional[int] = None
     per_device_batch_size: int = 2
@@ -114,6 +116,7 @@ class TrainConfig:
         if "training" in data:
             t = data["training"]
             config.output_dir = t.get("output_dir", config.output_dir)
+            config.resume_from_checkpoint = t.get("resume_from_checkpoint", config.resume_from_checkpoint)
             config.num_epochs = t.get("num_epochs", config.num_epochs)
             config.max_steps = t.get("max_steps", config.max_steps)
             config.per_device_batch_size = t.get("per_device_batch_size", config.per_device_batch_size)
@@ -246,11 +249,6 @@ class PreTokenizedDataset(Dataset):
             raise ValueError(f"Invalid data path: {data_path}")
         
         print(f"Loaded {len(self.data)} pre-tokenized examples")
-        if self.is_hf_dataset:
-            total_tokens = sum(len(example["input_ids"]) for example in self.data)
-        else:
-            total_tokens = sum(example["input_ids"].numel() for example in self.data)
-        print(f"Total tokens in dataset: {total_tokens:,}")
     
     def __len__(self):
         return len(self.data)
@@ -371,6 +369,40 @@ def evaluate(model, eval_loader, device, config: TrainConfig, rank: int):
     return avg_loss, perplexity
 
 
+def load_checkpoint(checkpoint_path: str, model, optimizer, scheduler, device, rank: int):
+    """Load model checkpoint and training state."""
+    if is_main_process(rank):
+        print(f"Loading checkpoint from {checkpoint_path}...")
+    
+    checkpoint_dir = Path(checkpoint_path)
+    
+    # Load model weights
+    model_path = checkpoint_dir / "model.pt"
+    if not model_path.exists():
+        raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+    
+    model_state = torch.load(model_path, map_location=device)
+    if hasattr(model, "module"):
+        model.module.load_state_dict(model_state)
+    else:
+        model.load_state_dict(model_state)
+    
+    # Load training state (optimizer, scheduler, step)
+    training_state_path = checkpoint_dir / "training_state.pt"
+    if not training_state_path.exists():
+        raise FileNotFoundError(f"Training state not found: {training_state_path}")
+    
+    training_state = torch.load(training_state_path, map_location=device)
+    optimizer.load_state_dict(training_state["optimizer"])
+    scheduler.load_state_dict(training_state["scheduler"])
+    step = training_state["step"]
+    
+    if is_main_process(rank):
+        print(f"Resumed from checkpoint at step {step}")
+    
+    return step
+
+
 def save_checkpoint(model, optimizer, scheduler, step, config: TrainConfig, rank: int):
     """Save model checkpoint."""
     if not is_main_process(rank):
@@ -409,6 +441,20 @@ def train(config: TrainConfig):
     # Set seed
     torch.manual_seed(config.seed + rank)
     
+    # Generate unique run ID and update output directory
+    if config.resume_from_checkpoint:
+        # When resuming, use the same output directory as the checkpoint
+        config.output_dir = str(Path(config.resume_from_checkpoint).parent)
+        if is_main_process(rank):
+            print(f"Resuming: Using existing output directory {config.output_dir}")
+    else:
+        # Create new run with unique ID
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        config.output_dir = os.path.join(config.output_dir, f"run_{run_id}")
+        if is_main_process(rank):
+            print(f"New run: Checkpoints will be saved to {config.output_dir}")
+            Path(config.output_dir).mkdir(parents=True, exist_ok=True)
+    
     # Initialize wandb
     if config.wandb_enabled and is_main_process(rank):
         wandb.init(
@@ -430,11 +476,20 @@ def train(config: TrainConfig):
     # Load model
     dtype = torch.bfloat16 if config.model_dtype == "bfloat16" else torch.float16
     
-    if config.init_from_scratch:
+    # Determine model loading strategy
+    if config.resume_from_checkpoint:
+        # When resuming, load config from checkpoint
+        if is_main_process(rank):
+            print(f"Resuming from checkpoint: {config.resume_from_checkpoint}")
+        checkpoint_config_path = os.path.join(config.resume_from_checkpoint, "config.json")
+        model_config = Qwen3Config.from_json(checkpoint_config_path)
+        model = Qwen3ForCausalLM(model_config)
+        model = model.to(device=device, dtype=dtype)
+        # Model weights will be loaded later along with optimizer/scheduler
+    elif config.init_from_scratch:
         if is_main_process(rank):
             print(f"Initializing model from scratch (random weights)...")
         # Load config from pretrained path but initialize with random weights
-        
         config_path = os.path.join(config.model_path, "config.json")
         model_config = Qwen3Config.from_json(config_path)
         model = Qwen3ForCausalLM(model_config)
@@ -600,13 +655,26 @@ def train(config: TrainConfig):
     # Create scheduler
     scheduler = get_lr_scheduler(optimizer, config, num_training_steps)
     
+    # Load checkpoint if resuming
+    global_step = 0
+    if config.resume_from_checkpoint:
+        global_step = load_checkpoint(
+            config.resume_from_checkpoint,
+            model,
+            optimizer,
+            scheduler,
+            device,
+            rank
+        )
+        if is_main_process(rank):
+            print(f"Resuming training from step {global_step}")
+    
     # Mixed precision
     scaler = torch.amp.GradScaler("cuda") if config.mixed_precision == "fp16" else None
     autocast_dtype = torch.bfloat16 if config.mixed_precision == "bf16" else torch.float16
     
     # Training loop
     model.train()
-    global_step = 0
     total_loss = 0.0
     start_time = time.time()
     tokens_processed = 0
