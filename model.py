@@ -9,6 +9,7 @@ from typing import Optional, Tuple, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 try:
     from .config import Qwen3Config
@@ -87,6 +88,8 @@ class Qwen3Model(nn.Module):
     def __init__(self, config: Qwen3Config):
         super().__init__()
         self.config = config
+        self.checkpoint_activations = config.checkpoint_activations
+        print(f"Checkpoint activations: {self.checkpoint_activations}")
         self.vocab_size = config.vocab_size
         
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
@@ -136,15 +139,26 @@ class Qwen3Model(nn.Module):
                 all_hidden_states += (hidden_states,)
             
             past_key_value = past_key_values[idx] if past_key_values is not None else None
-            
-            hidden_states, attn_weights, present_key_value = decoder_layer(
-                hidden_states,
-                attention_mask=causal_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_value,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-            )
+            if self.checkpoint_activations:
+                hidden_states, attn_weights, present_key_value = checkpoint(
+                    decoder_layer,
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_value,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    use_reentrant=False
+                )
+            else:
+                hidden_states, attn_weights, present_key_value = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_value,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                )
             
             if use_cache:
                 next_cache += (present_key_value,)

@@ -60,7 +60,7 @@ class TrainConfig:
     train_path: str = "./data/sample/sample.jsonl"
     val_path: Optional[str] = None
     max_seq_length: int = 512
-    num_workers: int = 4
+    num_workers: int = 8
     
     # Training
     output_dir: str = "./checkpoints"
@@ -80,6 +80,7 @@ class TrainConfig:
     logging_steps: int = 10
     seed: int = 42
     verbose: bool = False
+    checkpoint_activations: bool = False
     
     # Distributed
     strategy: str = "ddp"
@@ -132,6 +133,7 @@ class TrainConfig:
             config.logging_steps = t.get("logging_steps", config.logging_steps)
             config.seed = t.get("seed", config.seed)
             config.verbose = t.get("verbose", config.verbose)
+            config.checkpoint_activations = t.get("checkpoint_activations", config.checkpoint_activations)
         if "distributed" in data:
             config.strategy = data["distributed"].get("strategy", config.strategy)
             config.mixed_precision = data["distributed"].get("mixed_precision", config.mixed_precision)
@@ -244,6 +246,8 @@ class PreTokenizedDataset(Dataset):
                 # Try loading as HuggingFace dataset
                 print(f"Loading pre-tokenized HF dataset from {data_path}...")
                 self.data = load_from_disk(data_path)
+                # Set format to torch to avoid repeated tensor conversions
+                self.data.set_format(type="torch", columns=["input_ids", "attention_mask"])
                 self.is_hf_dataset = True
         else:
             raise ValueError(f"Invalid data path: {data_path}")
@@ -256,12 +260,13 @@ class PreTokenizedDataset(Dataset):
     def __getitem__(self, idx):
         if self.is_hf_dataset:
             example = self.data[idx]
-            input_ids = torch.tensor(example["input_ids"], dtype=torch.long)
-            attention_mask = torch.tensor(example["attention_mask"], dtype=torch.long)
+            # Data is already in tensor format due to set_format()
+            input_ids = example["input_ids"]
+            attention_mask = example["attention_mask"]
             
             # Create labels from input_ids if not present
             if "labels" in example:
-                labels = torch.tensor(example["labels"], dtype=torch.long)
+                labels = example["labels"]
             else:
                 labels = input_ids.clone()
                 # Mask padding tokens in labels
@@ -483,6 +488,7 @@ def train(config: TrainConfig):
             print(f"Resuming from checkpoint: {config.resume_from_checkpoint}")
         checkpoint_config_path = os.path.join(config.resume_from_checkpoint, "config.json")
         model_config = Qwen3Config.from_json(checkpoint_config_path)
+        model_config.checkpoint_activations = config.checkpoint_activations
         model = Qwen3ForCausalLM(model_config)
         model = model.to(device=device, dtype=dtype)
         # Model weights will be loaded later along with optimizer/scheduler
@@ -492,6 +498,7 @@ def train(config: TrainConfig):
         # Load config from pretrained path but initialize with random weights
         config_path = os.path.join(config.model_path, "config.json")
         model_config = Qwen3Config.from_json(config_path)
+        model_config.checkpoint_activations = config.checkpoint_activations
         model = Qwen3ForCausalLM(model_config)
         model = model.to(device=device, dtype=dtype)
     else:
@@ -502,6 +509,8 @@ def train(config: TrainConfig):
             device=device,
             dtype=dtype,
         )
+        model.config.checkpoint_activations = config.checkpoint_activations
+        model.model.checkpoint_activations = config.checkpoint_activations
     
     # Print model architecture
     if is_main_process(rank):
@@ -609,13 +618,15 @@ def train(config: TrainConfig):
         train_sampler = None
     
     train_loader = DataLoader(
-        train_dataset,
+        train_dataset, 
         batch_size=config.per_device_batch_size,
         sampler=train_sampler,
         shuffle=(train_sampler is None),
         num_workers=config.num_workers,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=True if config.num_workers > 0 else False,
+        prefetch_factor=2 if config.num_workers > 0 else None,
     )
     
     # Create validation dataloader
@@ -632,6 +643,8 @@ def train(config: TrainConfig):
         num_workers=config.num_workers,
         pin_memory=True,
         drop_last=False,
+        persistent_workers=True if config.num_workers > 0 else False,
+        prefetch_factor=2 if config.num_workers > 0 else None,
     )
     
     # Calculate training steps
@@ -677,7 +690,8 @@ def train(config: TrainConfig):
     model.train()
     total_loss = 0.0
     start_time = time.time()
-    tokens_processed = 0
+    last_log_time = start_time
+    last_log_step = 0
     
     if is_main_process(rank):
         print("Starting training...")
@@ -687,14 +701,10 @@ def train(config: TrainConfig):
             train_sampler.set_epoch(epoch)
         
         for step, batch in enumerate(train_loader):
-            # Move batch to device
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = batch["labels"].to(device)
-            
-            # Track tokens processed
-            if is_main_process(rank):
-                tokens_processed += attention_mask.sum().item()
+            # Move batch to device with non-blocking transfer
+            input_ids = batch["input_ids"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True)
             
             # Forward pass with autocast
             with torch.amp.autocast("cuda", dtype=autocast_dtype):
@@ -730,7 +740,7 @@ def train(config: TrainConfig):
                     optimizer.step()
                 
                 scheduler.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 
                 global_step += 1
                 
@@ -740,14 +750,23 @@ def train(config: TrainConfig):
                     lr = scheduler.get_last_lr()[0]
                     
                     # Calculate speed metrics
-                    elapsed_time = time.time() - start_time
-                    steps_per_sec = global_step / elapsed_time if elapsed_time > 0 else 0
-                    samples_per_sec = (global_step * config.per_device_batch_size * config.gradient_accumulation_steps * world_size) / elapsed_time if elapsed_time > 0 else 0
-                    tokens_per_sec = tokens_processed / elapsed_time if elapsed_time > 0 else 0
-                    ms_per_step = (elapsed_time / global_step * 1000) if global_step > 0 else 0
+                    current_time = time.time()
+                    elapsed_time = current_time - start_time
+                    
+                    # Instantaneous throughput (since last log)
+                    time_since_last_log = current_time - last_log_time
+                    steps_since_last_log = global_step - last_log_step
+                    steps_per_sec = steps_since_last_log / time_since_last_log if time_since_last_log > 0 else 0
+                    samples_since_last_log = steps_since_last_log * config.gradient_accumulation_steps * config.per_device_batch_size * world_size
+                    samples_per_sec = samples_since_last_log / time_since_last_log if time_since_last_log > 0 else 0
+                    ms_per_step = (time_since_last_log / steps_since_last_log * 1000) if steps_since_last_log > 0 else 0
+                    
+                    # Update last log tracking
+                    last_log_time = current_time
+                    last_log_step = global_step
                     
                     print(f"Step {global_step}/{num_training_steps} | Loss: {avg_loss:.4f} | LR: {lr:.2e} | "
-                          f"{ms_per_step:.1f}ms/step | {samples_per_sec:.1f} samples/s | {tokens_per_sec/1000:.1f}k tokens/s")
+                          f"{ms_per_step:.1f}ms/step | {samples_per_sec:.1f} samples/s")
                     
                     if config.wandb_enabled:
                         wandb.log({
@@ -757,7 +776,6 @@ def train(config: TrainConfig):
                             "train/global_step": global_step,
                             "speed/steps_per_sec": steps_per_sec,
                             "speed/samples_per_sec": samples_per_sec,
-                            "speed/tokens_per_sec": tokens_per_sec,
                             "speed/ms_per_step": ms_per_step,
                         }, step=global_step)
                     

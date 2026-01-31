@@ -28,6 +28,7 @@ class Qwen3Config:
     attention_dropout: float = 0.0
     bos_token_id: int = 151643
     eos_token_id: int = 151643
+    checkpoint_activations: bool = False
     
     @classmethod
     def from_dict(cls, config_dict: dict) -> "Qwen3Config":

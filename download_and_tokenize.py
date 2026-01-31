@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--dataset", type=str, default="monology/pile-uncopyrighted")
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--tokenizer", type=str, default="../qwen3_06b_base")
-    parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--max_length", type=int, default=10_000)
     parser.add_argument("--num_shards", type=int, default=5, help="Units of 10k rows")
     parser.add_argument("--num_proc", type=int, default=os.cpu_count() - 1)
     args = parser.parse_args()
@@ -32,7 +32,7 @@ def main():
 
     # 2. Materialize the subset (Download phase)
     # This only pulls the rows we specify, preventing the 800GB issue
-    total_samples = args.num_shards * 10000
+    total_samples = args.num_shards * 10_000
     print(f"--- Downloading {total_samples} samples from {args.dataset} ---")
     
     # from_generator converts the stream into a local 'Map-style' dataset 
