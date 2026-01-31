@@ -5,17 +5,17 @@
         "init_from_scratch": false
     },
     "data": {
-        "train_path": "./data/pile_train/tokenized",
+        "train_path": "./data/pile_train_longer/tokenized",
         "val_path": null,
-        "max_seq_length": 2048,
-        "num_workers": 16
+        "max_seq_length": 1024,
+        "num_workers": 8
     },
     "training": {
         "output_dir": "./checkpoints",
         "resume_from_checkpoint": null,
         "num_epochs": 1,
         "max_steps": 50000,
-        "per_device_batch_size": 24,
+        "per_device_batch_size": 8,
         "gradient_accumulation_steps": 8,
         "learning_rate": 5e-4,
         "weight_decay": 0.01,
@@ -23,11 +23,11 @@
         "lr_scheduler": "cosine",
         "max_grad_norm": 1.0,
         "save_steps": 500,
-        "eval_steps": 1000,
+        "eval_steps": 500,
         "eval_batches": 30,
         "logging_steps": 10,
         "seed": 42,
-        "verbose": false,
+        "verbose": true,
         "checkpoint_activations": false
     },
     "distributed": {

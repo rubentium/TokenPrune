@@ -169,31 +169,19 @@ class Qwen3Attention(nn.Module):
         else:
             present_key_value = None
         
-        # Use flash attention if available and enabled
-        if self._use_flash_attention and self._flash_attn_func is not None and not output_attentions:
-            attn_output = self._flash_attention_forward(
-                query_states, key_states, value_states, attention_mask
-            )
-            attn_weights = None
-        else:
-            # Standard attention
-            # Repeat KV heads for GQA (after caching)
-            key_states_expanded = self._repeat_kv(key_states, self.num_key_value_groups)
-            value_states_expanded = self._repeat_kv(value_states, self.num_key_value_groups)
-            
-            # Compute attention scores
-            attn_weights = torch.matmul(query_states, key_states_expanded.transpose(2, 3)) / math.sqrt(self.head_dim)
-            
-            # Apply attention mask
-            if attention_mask is not None:
-                attn_weights = attn_weights + attention_mask
-            
-            # Softmax and dropout
-            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-            attn_weights = F.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-            
-            # Compute attention output
-            attn_output = torch.matmul(attn_weights, value_states_expanded)
+        key_states = self._repeat_kv(key_states, self.num_key_value_groups)
+        value_states = self._repeat_kv(value_states, self.num_key_value_groups)
+        
+        attn_output = F.scaled_dot_product_attention(
+            query_states,
+            key_states, 
+            value_states, 
+            attn_mask=attention_mask, 
+            dropout_p=self.attention_dropout if self.training else 0.0,
+            is_causal=True if attention_mask is None else False 
+        )
+        
+        attn_weights = None # SDPA doesn't materialize weights, saving massive memory
         
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(batch_size, seq_len, self.attention_hidden_size)

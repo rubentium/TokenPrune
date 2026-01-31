@@ -39,6 +39,7 @@ try:
     from flash_attn import flash_attn_func
 except ImportError:
     flash_attn_func = None
+    print("flash_attn not available. Flash attention will be disabled.")
 
 try:
     from torchinfo import summary
@@ -219,7 +220,7 @@ class TextDataset(Dataset):
 class PreTokenizedDataset(Dataset):
     """Dataset for pre-tokenized data (no tokenization at runtime)."""
     
-    def __init__(self, data_path: str):
+    def __init__(self, data_path: str, max_seq_length: int = 2048):
         """
         Load pre-tokenized data.
         
@@ -228,7 +229,7 @@ class PreTokenizedDataset(Dataset):
                       path to HuggingFace dataset directory with tokenized data
         """
         self.data_path = data_path
-        
+        self.max_seq_length = max_seq_length
         # Check if it's a .pt file or directory
         if os.path.isfile(data_path) and data_path.endswith(".pt"):
             # Load from .pt file
@@ -261,12 +262,12 @@ class PreTokenizedDataset(Dataset):
         if self.is_hf_dataset:
             example = self.data[idx]
             # Data is already in tensor format due to set_format()
-            input_ids = example["input_ids"]
-            attention_mask = example["attention_mask"]
+            input_ids = example["input_ids"][:self.max_seq_length]
+            attention_mask = example["attention_mask"][:self.max_seq_length]
             
             # Create labels from input_ids if not present
             if "labels" in example:
-                labels = example["labels"]
+                labels = example["labels"][:self.max_seq_length]
             else:
                 labels = input_ids.clone()
                 # Mask padding tokens in labels
@@ -279,7 +280,7 @@ class PreTokenizedDataset(Dataset):
             }
         else:
             # Data is already in tensor format
-            return self.data[idx]
+            return self.data[idx][:self.max_seq_length]
 
 
 def get_lr_scheduler(optimizer, config: TrainConfig, num_training_steps: int):
@@ -491,6 +492,7 @@ def train(config: TrainConfig):
         model_config.checkpoint_activations = config.checkpoint_activations
         model = Qwen3ForCausalLM(model_config)
         model = model.to(device=device, dtype=dtype)
+        model = torch.compile(model)
         # Model weights will be loaded later along with optimizer/scheduler
     elif config.init_from_scratch:
         if is_main_process(rank):
@@ -588,7 +590,7 @@ def train(config: TrainConfig):
     if is_pretokenized:
         if is_main_process(rank):
             print("Using pre-tokenized dataset (no runtime tokenization)")
-        full_dataset = PreTokenizedDataset(config.train_path)
+        full_dataset = PreTokenizedDataset(config.train_path, max_seq_length=config.max_seq_length)
     else:
         if is_main_process(rank):
             print("Using raw text dataset (tokenizing at runtime)")
@@ -663,6 +665,7 @@ def train(config: TrainConfig):
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
         betas=(0.9, 0.95),
+        fused=True
     )
     
     # Create scheduler
